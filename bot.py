@@ -189,10 +189,12 @@ def compose_tweet(next_day, yhat, dc, log):
 
 
 def tweet(status):
+    # assumes: import os at module top
     if os.getenv("DRY_RUN", "0") == "1":
         print("[DRY_RUN] Would tweet:\n", status)
         return
-    import tweepy, os
+
+    import tweepy  # ok to import here; DON'T import os here
     client = tweepy.Client(
         consumer_key=os.environ["X_API_KEY"],
         consumer_secret=os.environ["X_API_SECRET"],
@@ -200,8 +202,13 @@ def tweet(status):
         access_token_secret=os.environ["X_ACCESS_SECRET"],
         wait_on_rate_limit=True,
     )
-    resp = client.create_tweet(text=status)
-    print("Tweet posted:", resp.data)
+    try:
+        resp = client.create_tweet(text=status)
+        print("Tweet posted:", resp.data)
+    except tweepy.Forbidden as e:
+        # Helpful message if app lacks write or wrong product tier
+        print("Twitter API Forbidden (check app permissions & tokens):", e)
+        raise
 
 
 
