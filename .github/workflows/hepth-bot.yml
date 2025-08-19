@@ -1,4 +1,4 @@
-name: hep-th daily forecast bot
+xname: hep-th daily forecast bot
 
 on:
   schedule:
