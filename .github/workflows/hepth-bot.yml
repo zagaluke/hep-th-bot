@@ -2,21 +2,28 @@ name: hep-th daily forecast bot
 
 on:
   schedule:
-    - cron: "0 17 * * 0-4"   # 17:00 UTC, Sunday–Thursday
-  workflow_dispatch:         # allow manual runs too
+    - cron: "0 17 * * 0-4"   # 17:00 UTC, Sun–Thu
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push CSV updates
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run bot
         env:
           DATA_DIR: data
@@ -25,5 +32,13 @@ jobs:
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
-          # DRY_RUN: "1"  # uncomment to test without posting
+          # DRY_RUN: "1"   # <= leave this OUT (or comment) to tweet for real
         run: python bot.py
+
+      - name: Commit updated CSVs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update daily counts & prediction log [skip ci]"
+          file_pattern: |
+            data/daily_counts.csv
+            data/pred_log.csv
