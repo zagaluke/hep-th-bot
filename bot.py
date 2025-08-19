@@ -66,9 +66,10 @@ def today_dub(): return pd.Timestamp.now(tz=TZ).normalize()
 def dow_dub(): return int(today_dub().dayofweek)  # Mon=0..Sun=6
 def load_csvs():
     dc  = pd.read_csv(DAILY_CSV, parse_dates=["date_first_appeared"]) if os.path.exists(DAILY_CSV) else pd.DataFrame(columns=["date_first_appeared","num_papers"])
-    hol = pd.read_csv(HOL_CSV, parse_dates=["date"])
-    conf= pd.read_csv(CONF_CSV, parse_dates=["start_date","end_date"])
-    if len(dc): dc = dc.sort_values("date_first_appeared").reset_index(drop=True)
+    hol = pd.read_csv(HOL_CSV, parse_dates=["date"]) if os.path.exists(HOL_CSV) else pd.DataFrame(columns=["date"])
+    conf= pd.read_csv(CONF_CSV, parse_dates=["start_date","end_date"]) if os.path.exists(CONF_CSV) else pd.DataFrame(columns=["start_date","end_date"])
+    if len(dc):
+        dc = dc.sort_values("date_first_appeared").reset_index(drop=True)
     return dc, hol, conf
 def save_dc(df): df.sort_values("date_first_appeared").to_csv(DAILY_CSV, index=False)
 
@@ -111,39 +112,48 @@ def append_if_missing(dc, date_obj, count):
     return pd.concat([dc, pd.DataFrame([{"date_first_appeared": ts, "num_papers": int(count)}])], ignore_index=True)
 
 def update_daily_counts():
+    # daily_counts.csv may already include the feature columns but only date/num_papers are filled;
+    # we always rebuild all features and overwrite the file.
     dc, hol, conf = load_csvs()
     d = today_dub().date()
     dow = dow_dub()
-    if dow in (0,1,2,3,4):  # Mon..Thu (and Mon if you run then)
+
+    # work from counts only
+    base = dc[["date_first_appeared","num_papers"]].copy() if "num_papers" in dc.columns else dc.copy()
+
+    def append_if_missing(date_obj, count):
+        ts = pd.Timestamp(date_obj)
+        if (base["date_first_appeared"] == ts).any():
+            return
+        base.loc[len(base)] = {"date_first_appeared": ts, "num_papers": int(count)}
+
+    if dow in (0,1,2,3,4):  # Mon..Fri runs (your schedule posts Sun–Thu at 17:00 UTC; Fri here only if you run manually)
         cnt = fetch_hepth_new_count_current()
-        dc = append_if_missing(dc, d, cnt)
-    elif dow == 6:  # Sunday: /new shows Friday; also add 0 for Sat and Sun
-        fri = d - pd.Timedelta(days=2)
-        sat = d - pd.Timedelta(days=1)
-        sun = d
-        cnt = fetch_hepth_new_count_current()  # Friday’s total exposed on Sunday
-        dc = append_if_missing(dc, fri, cnt)
-        dc = append_if_missing(dc, sat, 0)
-        dc = append_if_missing(dc, sun, 0)
-    save_dc(dc)
-    return dc, hol, conf
+        append_if_missing(d, cnt)
+    elif dow == 6:  # Sunday: /new shows Friday; add Fri count + 0 for Sat/Sun
+        fri, sat, sun = d - pd.Timedelta(days=2), d - pd.Timedelta(days=1), d
+        cnt = fetch_hepth_new_count_current()  # Friday’s total on Sunday’s /new page
+        append_if_missing(fri, cnt)
+        append_if_missing(sat, 0)
+        append_if_missing(sun, 0)
+
+    # rebuild full features and overwrite daily_counts.csv
+    full = build_features(daily_counts=base, holidays_df=hol, conference_df=conf)
+    full = full.sort_values("date_first_appeared").reset_index(drop=True)
+    full.to_csv(DAILY_CSV, index=False)
+    return full, hol, conf  # return feature-augmented df
 
 def predict_tomorrow(dc, hol, conf, model):
+    # compute features for the next day from counts-only view to avoid any stale columns
     next_date = today_dub() + pd.Timedelta(days=1)
-    X = build_features(daily_counts=dc, holidays_df=hol, conference_df=conf, next_date=next_date)
-
-    # drop non-features and align to trained order
-    X = X.drop(columns=['date_first_appeared', 'num_papers'], errors='ignore')
-    # add any missing features as 0 (or np.nan if that matches your training imputation)
+    base = dc[["date_first_appeared","num_papers"]].copy()
+    X = build_features(daily_counts=base, holidays_df=hol, conference_df=conf, next_date=next_date)
+    X = X.drop(columns=["date_first_appeared","num_papers"], errors="ignore")
     for c in FEATURE_COLS:
         if c not in X.columns:
             X[c] = 0
-    # keep only trained features, in order
     X = X.reindex(columns=FEATURE_COLS)
-
-    # predict (works for sklearn wrapper or Booster)
-    y = lgb_predict_any(model, X)
-    yhat = float(y[0])
+    yhat = float(lgb_predict_any(model, X)[0])
     return next_date.date(), yhat
 
 def compose_tweet(next_day, yhat, dc, log):
