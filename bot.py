@@ -192,14 +192,16 @@ def tweet(status):
     if os.getenv("DRY_RUN", "0") == "1":
         print("[DRY_RUN] Would tweet:\n", status)
         return
-    import tweepy
-    auth = tweepy.OAuth1UserHandler(
-        os.environ["X_API_KEY"],
-        os.environ["X_API_SECRET"],
-        os.environ["X_ACCESS_TOKEN"],
-        os.environ["X_ACCESS_SECRET"],
+    import tweepy, os
+    client = tweepy.Client(
+        consumer_key=os.environ["X_API_KEY"],
+        consumer_secret=os.environ["X_API_SECRET"],
+        access_token=os.environ["X_ACCESS_TOKEN"],
+        access_token_secret=os.environ["X_ACCESS_SECRET"],
+        wait_on_rate_limit=True,
     )
-    tweepy.API(auth).update_status(status=status)
+    resp = client.create_tweet(text=status)
+    print("Tweet posted:", resp.data)
 
 
 
