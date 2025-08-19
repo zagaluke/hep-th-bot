@@ -188,12 +188,6 @@ def compose_tweet(next_day, yhat, dc, log):
     )
 
 
-#def tweet(status):
-#    auth = tweepy.OAuth1UserHandler(os.environ["X_API_KEY"], os.environ["X_API_SECRET"], os.environ["X_ACCESS_TOKEN"], os.environ["X_ACCESS_SECRET"])
-#    tweepy.API(auth).update_status(status=status)
-
-
-
 def tweet(status):
     if os.getenv("DRY_RUN", "0") == "1":
         print("[DRY_RUN] Would tweet:\n", status)
