@@ -74,23 +74,44 @@ def load_csvs():
 def save_dc(df): df.sort_values("date_first_appeared").to_csv(DAILY_CSV, index=False)
 
 def read_log():
-    # ensure file exists
+    # Create file with proper dtypes if missing
     if not os.path.exists(LOG_CSV):
-        pd.DataFrame(columns=["date","yhat","tweeted_at","err_abs","actual"]).to_csv(LOG_CSV, index=False)
-    log = pd.read_csv(LOG_CSV)
-    # coerce to datetime (handles empty or bad rows)
-    if "date" in log.columns:
-        log["date"] = pd.to_datetime(log["date"], errors="coerce")
-    if "tweeted_at" in log.columns:
-        log["tweeted_at"] = pd.to_datetime(log["tweeted_at"], errors="coerce")
+        pd.DataFrame({
+            "date": pd.Series([], dtype="datetime64[ns]"),
+            "yhat": pd.Series([], dtype="float"),
+            "tweeted_at": pd.Series([], dtype="datetime64[ns]"),
+            "err_abs": pd.Series([], dtype="float"),
+            "actual": pd.Series([], dtype="float"),
+        }).to_csv(LOG_CSV, index=False)
+    log = pd.read_csv(LOG_CSV, parse_dates=["date", "tweeted_at"])
     return log
 
 
-
-def write_log(date, yhat): 
+def write_log(pred_date, yhat):
     log = read_log()
-    log = pd.concat([log, pd.DataFrame([{"date": pd.Timestamp(date), "yhat": float(yhat), "tweeted_at": pd.Timestamp.now(tz=TZ)}])], ignore_index=True)
+    pred_date = pd.Timestamp(pred_date).normalize()
+    now = pd.Timestamp.now(tz=TZ)
+
+    if len(log) and (log["date"].dt.normalize() == pred_date).any():
+        idx = log["date"].dt.normalize() == pred_date
+        log.loc[idx, "yhat"] = float(yhat)
+        # only set tweeted_at if empty (idempotent across retries)
+        log.loc[idx & log["tweeted_at"].isna(), "tweeted_at"] = now
+    else:
+        log = pd.concat([log, pd.DataFrame([{
+            "date": pred_date,
+            "yhat": float(yhat),
+            "tweeted_at": now,
+            "err_abs": pd.NA,
+            "actual": pd.NA,
+        }])], ignore_index=True)
+
+    # de-dup on date, keep latest
+    log = (log
+           .sort_values(["date", "tweeted_at"], na_position="last")
+           .drop_duplicates(subset=["date"], keep="last"))
     log.to_csv(LOG_CSV, index=False)
+    return log
 
 def fetch_hepth_new_count_current():
     r = requests.get("https://arxiv.org/list/hep-th/new?show=2000", headers={"User-Agent": UA}, timeout=30)
@@ -156,28 +177,38 @@ def predict_tomorrow(dc, hol, conf, model):
     yhat = float(lgb_predict_any(model, X)[0])
     return next_date.date(), yhat
 
-def compose_tweet(next_day, yhat, dc, log):
-    # format helpers
-    def fmt_d(d): return pd.Timestamp(d).strftime("%d/%m/%Y")
+def update_yesterday_error(dc):
+    log = read_log()
+    if log.empty or "date" not in log.columns:
+        return log
 
-    last = dc.iloc[-1]
-    last_date_ts = pd.to_datetime(last["date_first_appeared"])
-    last_date = last_date_ts.date()
-    last_val = int(last["num_papers"])
+    # yesterday's observed (the last row in daily_counts AFTER update_daily_counts())
+    last_date = pd.to_datetime(dc["date_first_appeared"].iloc[-1]).normalize()
+    last_val = int(dc["num_papers"].iloc[-1])
+
+    # if we had a prediction logged for that date, write error
+    mask = log["date"].dt.normalize() == last_date
+    if mask.any():
+        prev_pred = float(log.loc[mask, "yhat"].iloc[-1])
+        err_int = int(round(abs(prev_pred - last_val)))
+        log.loc[mask, ["err_abs", "actual"]] = [err_int, last_val]
+        log.to_csv(LOG_CSV, index=False)
+    return log
+
+
+
+def compose_tweet(next_day, yhat, dc, log):
+    def fmt_d(d): return pd.Timestamp(d).strftime("%d/%m/%Y")
+    last_date = pd.to_datetime(dc["date_first_appeared"].iloc[-1]).normalize()
+    last_val = int(dc["num_papers"].iloc[-1])
     yhat_round = int(round(yhat))
 
-    # previous prediction error (rounded to int)
+    # pick up error if we just wrote it (or it already existed)
     err_txt = ""
-    if "date" in log.columns and "yhat" in log.columns and len(log):
-        log["date"] = pd.to_datetime(log["date"], errors="coerce")
-        mask = log["date"].dt.date == last_date
-        if mask.any():
-            prev_pred = float(log.loc[mask, "yhat"].iloc[0])
-            err_int = int(round(abs(prev_pred - last_val)))
-            err_txt = f"\n• Error on {fmt_d(last_date)}: {err_int}"
-            # write back error & actual
-            log.loc[mask, ["err_abs","actual"]] = [err_int, last_val]
-            log.to_csv(LOG_CSV, index=False)
+    if not log.empty and "date" in log.columns:
+        m = log["date"].dt.normalize() == last_date
+        if m.any() and not pd.isna(log.loc[m, "err_abs"].iloc[-1]):
+            err_txt = f"\n• Error on {fmt_d(last_date)}: {int(round(float(log.loc[m, 'err_abs'].iloc[-1])))}"
 
     return (
         f"hep-th forecast for {fmt_d(next_day)}:\n"
@@ -214,12 +245,18 @@ def tweet(status):
 
 
 def main():
-    dc, hol, conf = update_daily_counts()
+    dc, hol, conf = update_daily_counts()       
     model = load_any_lgb_model(MODEL_PATH)
     next_day, yhat = predict_tomorrow(dc, hol, conf, model)
-    log = read_log()
+
+    # 1) update error for yesterday, persist
+    log = update_yesterday_error(dc)
+
+    # 2) compose + tweet
     status = compose_tweet(next_day, yhat, dc, log)
     tweet(status)
+
+    # 3) log today's prediction, persist (so tomorrow we can compute error)
     write_log(next_day, yhat)
 
 if __name__ == "__main__":
