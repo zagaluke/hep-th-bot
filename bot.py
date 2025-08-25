@@ -73,6 +73,19 @@ def load_csvs():
     return dc, hol, conf
 def save_dc(df): df.sort_values("date_first_appeared").to_csv(DAILY_CSV, index=False)
 
+
+# --- helpers for Mon–Fri "last observed" ---
+def last_business_day_row(dc):
+    m = dc["date_first_appeared"].dt.weekday <= 4   # Mon(0) .. Fri(4)
+    if m.any():
+        return dc.loc[m].iloc[-1]
+    return dc.iloc[-1]  # fallback (shouldn't happen with your schedule)
+
+def last_business_day(dc):
+    return pd.to_datetime(last_business_day_row(dc)["date_first_appeared"]).normalize()
+
+
+
 def read_log():
     # Create file with proper dtypes if missing
     if not os.path.exists(LOG_CSV):
@@ -182,16 +195,14 @@ def update_yesterday_error(dc):
     if log.empty or "date" not in log.columns:
         return log
 
-    # yesterday's observed (the last row in daily_counts AFTER update_daily_counts())
-    last_date = pd.to_datetime(dc["date_first_appeared"].iloc[-1]).normalize()
-    last_val = int(dc["num_papers"].iloc[-1])
+    obs_date = last_business_day(dc)                     # e.g., Friday on Sunday runs
+    obs_val  = int(last_business_day_row(dc)["num_papers"])
 
-    # if we had a prediction logged for that date, write error
-    mask = log["date"].dt.normalize() == last_date
+    mask = log["date"].dt.normalize() == obs_date
     if mask.any():
         prev_pred = float(log.loc[mask, "yhat"].iloc[-1])
-        err_int = int(round(abs(prev_pred - last_val)))
-        log.loc[mask, ["err_abs", "actual"]] = [err_int, last_val]
+        err_int   = int(round(abs(prev_pred - obs_val)))
+        log.loc[mask, ["err_abs", "actual"]] = [err_int, obs_val]
         log.to_csv(LOG_CSV, index=False)
     return log
 
@@ -199,21 +210,22 @@ def update_yesterday_error(dc):
 
 def compose_tweet(next_day, yhat, dc, log):
     def fmt_d(d): return pd.Timestamp(d).strftime("%d/%m/%Y")
-    last_date = pd.to_datetime(dc["date_first_appeared"].iloc[-1]).normalize()
-    last_val = int(dc["num_papers"].iloc[-1])
+
+    obs_row  = last_business_day_row(dc)
+    obs_date = pd.to_datetime(obs_row["date_first_appeared"]).normalize()
+    obs_val  = int(obs_row["num_papers"])
     yhat_round = int(round(yhat))
 
-    # pick up error if we just wrote it (or it already existed)
     err_txt = ""
-    if not log.empty and "date" in log.columns:
-        m = log["date"].dt.normalize() == last_date
+    if not log.empty and "date" in log.columns and "err_abs" in log.columns:
+        m = log["date"].dt.normalize() == obs_date
         if m.any() and not pd.isna(log.loc[m, "err_abs"].iloc[-1]):
-            err_txt = f"\n• Error on {fmt_d(last_date)}: {int(round(float(log.loc[m, 'err_abs'].iloc[-1])))}"
+            err_txt = f"\n• Error on {fmt_d(obs_date)}: {int(round(float(log.loc[m, 'err_abs'].iloc[-1])))}"
 
     return (
         f"hep-th forecast for {fmt_d(next_day)}:\n"
         f"• Predicted new papers: {yhat_round}\n"
-        f"• Last observed ({fmt_d(last_date)}): {last_val}"
+        f"• Last observed ({fmt_d(obs_date)}): {obs_val}"
         f"{err_txt}\n"
         "#hepth #arXiv"
     )
