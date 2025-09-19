@@ -3,7 +3,7 @@
 Predicts tomorrow’s hep-th “new” paper count and tweets it nightly.
 Runs via GitHub Actions; maintains CSV history for features and evaluation.
 
-# what it does
+# workflow
 
 Scrapes daily hep-th “new” counts and maintains data/daily_counts.csv.
 
