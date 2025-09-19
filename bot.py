@@ -171,31 +171,6 @@ def write_prediction(pred_date, yhat):
     return log    
 
 
-def write_log(pred_date, yhat):
-    log = read_log()
-    pred_date = pd.Timestamp(pred_date).normalize()
-    now = pd.Timestamp.now(tz=TZ)
-
-    if len(log) and (log["date"].dt.normalize() == pred_date).any():
-        idx = log["date"].dt.normalize() == pred_date
-        log.loc[idx, "yhat"] = float(yhat)
-        # only set tweeted_at if empty (idempotent across retries)
-        log.loc[idx & log["tweeted_at"].isna(), "tweeted_at"] = now
-    else:
-        log = pd.concat([log, pd.DataFrame([{
-            "date": pred_date,
-            "yhat": float(yhat),
-            "tweeted_at": now,
-            "err_abs": pd.NA,
-            "actual": pd.NA,
-        }])], ignore_index=True)
-
-    # de-dup on date, keep latest
-    log = (log
-           .sort_values(["date", "tweeted_at"], na_position="last")
-           .drop_duplicates(subset=["date"], keep="last"))
-    log.to_csv(LOG_CSV, index=False)
-    return log
     
 def mark_tweeted(pred_date):
     log = read_log()
@@ -223,11 +198,6 @@ def fetch_hepth_new_count_current():
         if el.name == "h3": break
         if el.name == "dt": cnt += 1
     return cnt
-
-def append_if_missing(dc, date_obj, count):
-    ts = pd.Timestamp(date_obj)
-    if (dc["date_first_appeared"] == ts).any(): return dc
-    return pd.concat([dc, pd.DataFrame([{"date_first_appeared": ts, "num_papers": int(count)}])], ignore_index=True)
 
 def update_daily_counts():
     # daily_counts.csv may already include the feature columns but only date/num_papers are filled;
