@@ -5,7 +5,7 @@ import sys
 print(">>> Python executable:", sys.executable)
 print(">>> sys.path[0]:", sys.path[0])
 
-import os, re, requests, pandas as pd, numpy as np, joblib, tweepy
+import os, re, requests, pandas as pd, numpy as np, joblib
 from dotenv import load_dotenv; load_dotenv()
 from bs4 import BeautifulSoup
 from features import build_features
@@ -77,7 +77,10 @@ def load_csvs():
     if len(dc):
         dc = dc.sort_values("date_first_appeared").reset_index(drop=True)
     return dc, hol, conf
-def save_dc(df): df.sort_values("date_first_appeared").to_csv(DAILY_CSV, index=False)
+    
+def save_dc(df):
+    df = df.sort_values("date_first_appeared")
+    _atomic_to_csv(df, DAILY_CSV)
 
 def _atomic_to_csv(df: pd.DataFrame, path: str):
     tmp = f"{path}.tmp"
@@ -257,7 +260,7 @@ def update_yesterday_error(dc):
         prev_pred = float(log.loc[mask, "yhat"].iloc[-1])
         err_int   = int(round(abs(prev_pred - obs_val)))
         log.loc[mask, ["err_abs", "actual"]] = [err_int, obs_val]
-        log.to_csv(LOG_CSV, index=False)
+	_atomic_to_csv(log, LOG_CSV)
     return log
 
 
