@@ -60,10 +60,16 @@ FEATURE_COLS = [
     'days_until_next_conference',
 ]
 
+def today_dub():
+    s = os.getenv("FAKE_TODAY")
+    if s:
+        # Interpret FAKE_TODAY in Europe/Dublin, e.g. "2025-09-05"
+        return pd.Timestamp(s).tz_localize("Europe/Dublin").normalize()
+    return pd.Timestamp.now(tz=TZ).normalize()
 
-
-def today_dub(): return pd.Timestamp.now(tz=TZ).normalize()
-def dow_dub(): return int(today_dub().dayofweek)  # Mon=0..Sun=6
+def dow_dub():
+    return int(today_dub().dayofweek)  # Mon=0..Sun=6
+    
 def load_csvs():
     dc  = pd.read_csv(DAILY_CSV, parse_dates=["date_first_appeared"]) if os.path.exists(DAILY_CSV) else pd.DataFrame(columns=["date_first_appeared","num_papers"])
     hol = pd.read_csv(HOL_CSV, parse_dates=["date"]) if os.path.exists(HOL_CSV) else pd.DataFrame(columns=["date"])
@@ -73,6 +79,10 @@ def load_csvs():
     return dc, hol, conf
 def save_dc(df): df.sort_values("date_first_appeared").to_csv(DAILY_CSV, index=False)
 
+def _atomic_to_csv(df: pd.DataFrame, path: str):
+    tmp = f"{path}.tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
 
 # --- helpers for Mon–Fri "last observed" ---
 def last_business_day_row(dc):
@@ -85,19 +95,80 @@ def last_business_day(dc):
     return pd.to_datetime(last_business_day_row(dc)["date_first_appeared"]).normalize()
 
 
-
 def read_log():
-    # Create file with proper dtypes if missing
+    # Ensure file exists with correct schema
+    cols = ["date", "yhat", "tweeted_at", "err_abs", "actual"]
     if not os.path.exists(LOG_CSV):
-        pd.DataFrame({
+        empty = pd.DataFrame({
             "date": pd.Series([], dtype="datetime64[ns]"),
             "yhat": pd.Series([], dtype="float"),
             "tweeted_at": pd.Series([], dtype="datetime64[ns]"),
             "err_abs": pd.Series([], dtype="float"),
             "actual": pd.Series([], dtype="float"),
-        }).to_csv(LOG_CSV, index=False)
-    log = pd.read_csv(LOG_CSV, parse_dates=["date", "tweeted_at"])
-    return log
+        })
+        _atomic_to_csv(empty, LOG_CSV)
+
+    # Tolerant read in case of malformed lines
+    try:
+        log = pd.read_csv(LOG_CSV, parse_dates=["date", "tweeted_at"], on_bad_lines="skip")
+    except Exception:
+        # Last resort: read without parse_dates then coerce; keep a backup
+        try:
+            os.replace(LOG_CSV, LOG_CSV + ".corrupt_backup")
+        except Exception:
+            pass
+        log = pd.DataFrame(columns=cols)
+
+    # Enforce schema and coerce types
+    for c in cols:
+        if c not in log.columns:
+            log[c] = pd.NA
+    log["date"] = pd.to_datetime(log["date"], errors="coerce").dt.tz_localize(None)
+    log["tweeted_at"] = pd.to_datetime(log["tweeted_at"], errors="coerce")
+    for c in ["yhat", "err_abs", "actual"]:
+        log[c] = pd.to_numeric(log[c], errors="coerce")
+
+    # De-dup by date (normalized), keep latest by tweeted_at
+    if not log.empty:
+        log["date_norm"] = log["date"].dt.normalize()
+        log = (log.sort_values(["date_norm", "tweeted_at"], na_position="last")
+                  .drop_duplicates(subset=["date_norm"], keep="last")
+                  .drop(columns=["date_norm"]))
+        log = log.sort_values("date")
+
+    return log.reset_index(drop=True)
+    
+    
+    
+    
+def write_prediction(pred_date, yhat):
+    log = read_log()
+    pred_date = pd.Timestamp(pred_date).normalize()
+    row = {
+        "date": pred_date,
+        "yhat": float(yhat),
+        "tweeted_at": pd.NaT,
+        "err_abs": pd.NA,
+        "actual": pd.NA,
+    }
+    if not log.empty and (log["date"].dt.normalize() == pred_date).any():
+        m = log["date"].dt.normalize() == pred_date
+        for k, v in row.items():
+            if k == "tweeted_at":
+                # do not overwrite tweeted_at here
+                continue
+            log.loc[m, k] = v
+    else:
+        log = pd.concat([log, pd.DataFrame([row])], ignore_index=True)
+
+    # De-dup (stay consistent with read_log)
+    log["date_norm"] = log["date"].dt.normalize()
+    log = (log.sort_values(["date_norm", "tweeted_at"], na_position="last")
+              .drop_duplicates(subset=["date_norm"], keep="last")
+              .drop(columns=["date_norm"]))
+    log = log.sort_values("date").reset_index(drop=True)
+    _atomic_to_csv(log, LOG_CSV)
+    return log    
 
 
 def write_log(pred_date, yhat):
@@ -125,6 +196,19 @@ def write_log(pred_date, yhat):
            .drop_duplicates(subset=["date"], keep="last"))
     log.to_csv(LOG_CSV, index=False)
     return log
+    
+def mark_tweeted(pred_date):
+    log = read_log()
+    if log.empty:
+        return log
+    pred_date = pd.Timestamp(pred_date).normalize()
+    m = log["date"].dt.normalize() == pred_date
+    now = pd.Timestamp.now(tz=TZ)
+    if m.any():
+        # only set if missing to keep idempotency
+        log.loc[m & log["tweeted_at"].isna(), "tweeted_at"] = now
+        _atomic_to_csv(log, LOG_CSV)
+    return log    
 
 def fetch_hepth_new_count_current():
     r = requests.get("https://arxiv.org/list/hep-th/new?show=2000", headers={"User-Agent": UA}, timeout=30)
@@ -257,19 +341,28 @@ def tweet(status):
 
 
 def main():
-    dc, hol, conf = update_daily_counts()       
+    # 0) refresh counts/features
+    dc, hol, conf = update_daily_counts()
     model = load_any_lgb_model(MODEL_PATH)
     next_day, yhat = predict_tomorrow(dc, hol, conf, model)
 
-    # 1) update error for yesterday, persist
+    # 1) update error for last business day
     log = update_yesterday_error(dc)
 
-    # 2) compose + tweet
-    status = compose_tweet(next_day, yhat, dc, log)
-    tweet(status)
+    # 2) WRITE TODAY’S PREDICTION FIRST (so we never lose it)
+    log = write_prediction(next_day, yhat)
 
-    # 3) log today's prediction, persist (so tomorrow we can compute error)
-    write_log(next_day, yhat)
+    # 3) compose status using the (now up-to-date) log
+    status = compose_tweet(next_day, yhat, dc, log)
+
+    # 4) tweet (or DRY_RUN prints), then mark_tweeted on success
+    try:
+        tweet(status)
+        mark_tweeted(next_day)
+    except Exception as e:
+        # Keep the prediction row even if tweeting fails
+        print("Tweeting failed; prediction was logged. Error:", repr(e))
+        # Do not re-raise, so the workflow can still commit updated CSVs
 
 if __name__ == "__main__":
     main()
