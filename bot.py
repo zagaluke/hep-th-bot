@@ -5,11 +5,15 @@ import sys
 print(">>> Python executable:", sys.executable)
 print(">>> sys.path[0]:", sys.path[0])
 
+#import relevant packages
+
 import os, re, requests, pandas as pd, numpy as np, joblib
 from dotenv import load_dotenv; load_dotenv()
 from bs4 import BeautifulSoup
 from features import build_features
 import lightgbm as lgb
+
+#open files
 
 DATA_DIR   = os.getenv("DATA_DIR", "data")
 DAILY_CSV  = os.path.join(DATA_DIR, "daily_counts.csv")
@@ -22,10 +26,10 @@ UA         = "hepth-bot/0.1 (mailto:your.email@example.com)"
 
 
 def load_any_lgb_model(path):
-    # If you saved a native LightGBM text model (model.txt)
+
     if path.lower().endswith(".txt"):
         return lgb.Booster(model_file=path)
-    # Else try joblib/pickle
+
     m = joblib.load(path)
     return m
 
@@ -42,6 +46,8 @@ def lgb_predict_any(model, X_frame):
     # Fallback: try calling predict anyway
     return model.predict(X_frame)
 
+
+#features
 
 FEATURE_COLS = [
     'days_until_public_holiday',
@@ -61,9 +67,8 @@ FEATURE_COLS = [
 ]
 
 def today_dub():
-    s = os.getenv("FAKE_TODAY")
+    s = os.getenv("FAKE_TODAY") #for testing
     if s:
-        # Interpret FAKE_TODAY in Europe/Dublin, e.g. "2025-09-05"
         return pd.Timestamp(s).tz_localize("Europe/Dublin").normalize()
     return pd.Timestamp.now(tz=TZ).normalize()
 
@@ -87,7 +92,7 @@ def _atomic_to_csv(df: pd.DataFrame, path: str):
     df.to_csv(tmp, index=False)
     os.replace(tmp, path)
 
-# --- helpers for Mon–Fri "last observed" ---
+
 def last_business_day_row(dc):
     m = dc["date_first_appeared"].dt.weekday <= 4   # Mon(0) .. Fri(4)
     if m.any():
