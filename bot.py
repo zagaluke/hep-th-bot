@@ -265,7 +265,7 @@ def update_yesterday_error(dc):
         prev_pred = float(log.loc[mask, "yhat"].iloc[-1])
         err_int   = int(round(abs(prev_pred - obs_val)))
         log.loc[mask, ["err_abs", "actual"]] = [err_int, obs_val]
-	_atomic_to_csv(log, LOG_CSV)
+        _atomic_to_csv(log, LOG_CSV)
     return log
 
 
