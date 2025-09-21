@@ -252,21 +252,36 @@ def predict_tomorrow(dc, hol, conf, model):
     yhat = float(lgb_predict_any(model, X)[0])
     return next_date.date(), yhat
 
-def update_yesterday_error(dc):
+def update_yesterday_error(dc: pd.DataFrame) -> pd.DataFrame:
     log = read_log()
-    if log.empty or "date" not in log.columns:
+    if dc is None or dc.empty or log.empty or "date" not in log.columns:
         return log
 
-    obs_date = last_business_day(dc)                     # e.g., Friday on Sunday runs
-    obs_val  = int(last_business_day_row(dc)["num_papers"])
+    # Get last business day row safely
+    try:
+        r = last_business_day_row(dc)  # should have date_first_appeared/num_papers
+        obs_date = pd.Timestamp(r["date_first_appeared"]).normalize()
+        obs_val = int(r["num_papers"])
+    except Exception:
+        return log
 
-    mask = log["date"].dt.normalize() == obs_date
-    if mask.any():
-        prev_pred = float(log.loc[mask, "yhat"].iloc[-1])
-        err_int   = int(round(abs(prev_pred - obs_val)))
-        log.loc[mask, ["err_abs", "actual"]] = [err_int, obs_val]
+    # Ensure log['date'] comparable to obs_date
+    log["date"] = pd.to_datetime(log["date"], errors="coerce").dt.normalize()
+
+    mask = log["date"] == obs_date
+    if not mask.any():
+        return log
+
+    # Update only if yhat exists
+    if log.loc[mask, "yhat"].notna().any():
+        yhat = float(log.loc[mask, "yhat"].iloc[-1])
+        err_abs = abs(obs_val - yhat)
+        # keep types sensible: actual as float, err_abs as float
+        log.loc[mask, ["actual", "err_abs"]] = [float(obs_val), err_abs]
         _atomic_to_csv(log, LOG_CSV)
+
     return log
+
 
 
 
